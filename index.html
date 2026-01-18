@@ -3,42 +3,25 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>手指速算挑戰 - 順暢優化版</title>
+    <title>手指速算挑戰 - 邏輯修正版</title>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
     
     <style>
         :root { --primary: #00d2ff; --success: #00ff88; --danger: #ff4e50; }
-        body { 
-            margin: 0; background: #0f0f0f; color: white; 
-            font-family: 'PingFang TC', sans-serif;
-            display: flex; flex-direction: column; height: 100vh; overflow: hidden;
-        }
+        body { margin: 0; background: #0f0f0f; color: white; font-family: sans-serif; display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
         #video-wrap { width: 100%; height: 35vh; background: #000; position: relative; }
         #input_video { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
         #guide-canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; transform: scaleX(-1); }
-
         #game-ui { flex: 1; display: flex; flex-direction: column; justify-content: center; align-items: center; padding: 20px; }
-        #target-number { font-size: 140px; font-weight: 900; color: var(--primary); margin: 0; transition: all 0.2s; }
+        #target-number { font-size: 140px; font-weight: 900; color: var(--primary); margin: 0; transition: transform 0.2s; }
         #timer-bg { width: 80%; height: 12px; background: #333; border-radius: 6px; margin: 25px 0; overflow: hidden; }
         #timer-bar { width: 100%; height: 100%; background: var(--danger); }
-        
-        #stats { font-size: 20px; letter-spacing: 2px; }
+        #stats { font-size: 20px; }
         #detected-hint { margin-top: 10px; color: var(--success); font-weight: bold; }
-
-        /* 開始與結束蓋板 */
-        #overlay {
-            position: fixed; inset: 0; background: rgba(0,0,0,0.9);
-            display: flex; flex-direction: column; justify-content: center; align-items: center;
-            z-index: 100; text-align: center;
-        }
-        .btn {
-            padding: 18px 45px; font-size: 22px; background: var(--primary); color: #000;
-            border: none; border-radius: 50px; font-weight: bold; cursor: pointer;
-            box-shadow: 0 0 20px rgba(0, 210, 255, 0.4);
-        }
-        .btn:disabled { background: #555; color: #888; box-shadow: none; }
-        #msg { margin-bottom: 20px; padding: 0 20px; }
+        #overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.9); display: flex; flex-direction: column; justify-content: center; align-items: center; z-index: 100; text-align: center; }
+        .btn { padding: 18px 45px; font-size: 22px; background: var(--primary); color: #000; border: none; border-radius: 50px; font-weight: bold; cursor: pointer; }
+        .btn:disabled { background: #555; color: #888; }
     </style>
 </head>
 <body>
@@ -71,10 +54,21 @@
         const overlay = document.getElementById('overlay');
         const titleEl = document.getElementById('title');
         const descEl = document.getElementById('desc');
+        const timerBar = document.getElementById('timer-bar');
         
-        let game = { active: false, score: 0, hp: 3, target: 0, timeLeft: 5, detected: 0, lastTarget: 0 };
-        let modelLoaded = false;
+        // 核心遊戲狀態
+        let game = {
+            active: false,
+            score: 0,
+            hp: 3,
+            target: 0,
+            lastTarget: 0,
+            timeLeft: 5,
+            detected: 0
+        };
+
         let cameraStarted = false;
+        let animationFrameId = null;
 
         // --- MediaPipe 初始化 ---
         const hands = new Hands({
@@ -93,15 +87,21 @@
             if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
                 const lm = results.multiHandLandmarks[0];
                 let count = 0;
-                if (lm[8].y < lm[6].y) count++;
-                if (lm[12].y < lm[10].y) count++;
-                if (lm[16].y < lm[14].y) count++;
-                if (lm[20].y < lm[18].y) count++;
+                // 判斷手指開闔 (Landmarks 8, 12, 16, 20 vs 6, 10, 14, 18)
+                [8, 12, 16, 20].forEach((tip, idx) => {
+                    const pip = [6, 10, 14, 18][idx];
+                    if (lm[tip].y < lm[pip].y) count++;
+                });
+                // 拇指獨立判斷
                 if (Math.abs(lm[4].x - lm[5].x) > 0.08) count++;
                 
                 game.detected = count;
                 document.getElementById('detected-count').innerText = count;
-                if (game.active && count === game.target) handleCorrect();
+                
+                // 檢查答案：必須是遊戲中且數字相符
+                if (game.active && count === game.target) {
+                    handleCorrect();
+                }
             }
         });
 
@@ -124,44 +124,48 @@
             width: 640, height: 480
         });
 
-        // 首次模擬加載（僅執行一次）
+        // 初始化下載模型
         setTimeout(() => {
-            modelLoaded = true;
             startBtn.disabled = false;
             startBtn.innerText = "開始挑戰";
-            descEl.innerText = "AI 準備就緒，隨時可以開始！";
+            descEl.innerText = "模型載入完成！";
         }, 4000);
 
         function startGame() {
+            // 1. 清理舊的動畫循環（防止第二次遊玩加速或停住）
+            if (animationFrameId) cancelAnimationFrame(animationFrameId);
+
             overlay.style.display = 'none';
-            // 重置遊戲數據
+            
+            // 2. 初始化所有狀態
             game.score = 0;
             game.hp = 3;
+            game.lastTarget = 0; // 重置上一次數字
             game.active = true;
+            
             document.getElementById('score').innerText = "0";
             document.getElementById('hp').innerText = "3";
             
-            // 只有第一次需要啟動相機硬體
             if (!cameraStarted) {
                 camera.start();
                 cameraStarted = true;
             }
             
             nextRound();
-            requestAnimationFrame(tick);
+            animationFrameId = requestAnimationFrame(gameLoop);
         }
 
         function nextRound() {
-            // 1. 防止連續出現同樣數字
-            let newTarget;
+            let nextNum;
+            // 確保新數字不重複
             do {
-                newTarget = Math.floor(Math.random() * 5) + 1;
-            } while (newTarget === game.lastTarget);
+                nextNum = Math.floor(Math.random() * 5) + 1;
+            } while (nextNum === game.lastTarget);
             
-            game.target = newTarget;
-            game.lastTarget = newTarget;
+            game.target = nextNum;
+            game.lastTarget = nextNum;
+            game.timeLeft = 5; // 重置倒數時間
             
-            game.timeLeft = 5;
             const el = document.getElementById('target-number');
             el.innerText = game.target;
             el.style.color = "var(--primary)";
@@ -169,45 +173,57 @@
         }
 
         function handleCorrect() {
-            game.active = false;
+            game.active = false; // 暫停計時與判斷
             game.score += 10;
             document.getElementById('score').innerText = game.score;
+            
             const el = document.getElementById('target-number');
             el.style.color = "var(--success)";
             el.style.transform = "scale(1.2)";
-            // 答對後短暫停頓進入下一題
-            setTimeout(() => { 
+            
+            // 延遲進入下一題，提供視覺回饋
+            setTimeout(() => {
                 if (game.hp > 0) {
-                    game.active = true; 
-                    nextRound(); 
+                    game.active = true;
+                    nextRound();
                 }
             }, 600);
         }
 
-        function tick() {
-            if (!game.active || game.hp <= 0) return;
+        function gameLoop() {
+            if (!game.active) {
+                // 如果是暫停狀態(答對瞬間)，動畫繼續跑但時間不動
+                animationFrameId = requestAnimationFrame(gameLoop);
+                return;
+            }
 
-            game.timeLeft -= 0.03; // 控制倒數速度
-            document.getElementById('timer-bar').style.width = (game.timeLeft / 5) * 100 + "%";
+            game.timeLeft -= 0.025; // 每一影格減少固定時間
+            const percentage = (game.timeLeft / 5) * 100;
+            timerBar.style.width = percentage + "%";
             
             if (game.timeLeft <= 0) {
                 game.hp--;
                 document.getElementById('hp').innerText = game.hp;
+                
                 if (game.hp <= 0) {
-                    gameOver();
+                    endGame();
+                    return;
                 } else {
                     nextRound();
                 }
             }
-            if (game.hp > 0) requestAnimationFrame(tick);
+            
+            animationFrameId = requestAnimationFrame(gameLoop);
         }
 
-        function gameOver() {
+        function endGame() {
             game.active = false;
+            if (animationFrameId) cancelAnimationFrame(animationFrameId);
+            
             overlay.style.display = 'flex';
-            titleEl.innerText = "遊戲結束";
-            descEl.innerHTML = `最終得分：<span style="font-size:32px; color:var(--success)">${game.score}</span><br>模型已在後台載入，可立即重新開始。`;
-            startBtn.innerText = "再玩一次";
+            titleEl.innerText = "挑戰結束";
+            descEl.innerHTML = `最終得分：<span style="font-size:32px; color:var(--success)">${game.score}</span><br>模型已就緒，可立即再挑戰。`;
+            startBtn.innerText = "再次挑戰";
         }
 
         startBtn.onclick = startGame;
