@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>手指速算挑戰 - 邏輯修正版</title>
+    <title>手指速算挑戰 - 計時器修復版</title>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
     
@@ -56,7 +56,6 @@
         const descEl = document.getElementById('desc');
         const timerBar = document.getElementById('timer-bar');
         
-        // 核心遊戲狀態
         let game = {
             active: false,
             score: 0,
@@ -64,13 +63,13 @@
             target: 0,
             lastTarget: 0,
             timeLeft: 5,
+            maxTime: 5,
             detected: 0
         };
 
         let cameraStarted = false;
         let animationFrameId = null;
 
-        // --- MediaPipe 初始化 ---
         const hands = new Hands({
             locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
         });
@@ -87,18 +86,15 @@
             if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
                 const lm = results.multiHandLandmarks[0];
                 let count = 0;
-                // 判斷手指開闔 (Landmarks 8, 12, 16, 20 vs 6, 10, 14, 18)
                 [8, 12, 16, 20].forEach((tip, idx) => {
                     const pip = [6, 10, 14, 18][idx];
                     if (lm[tip].y < lm[pip].y) count++;
                 });
-                // 拇指獨立判斷
                 if (Math.abs(lm[4].x - lm[5].x) > 0.08) count++;
                 
                 game.detected = count;
                 document.getElementById('detected-count').innerText = count;
                 
-                // 檢查答案：必須是遊戲中且數字相符
                 if (game.active && count === game.target) {
                     handleCorrect();
                 }
@@ -124,23 +120,19 @@
             width: 640, height: 480
         });
 
-        // 初始化下載模型
         setTimeout(() => {
             startBtn.disabled = false;
             startBtn.innerText = "開始挑戰";
             descEl.innerText = "模型載入完成！";
-        }, 4000);
+        }, 3000);
 
         function startGame() {
-            // 1. 清理舊的動畫循環（防止第二次遊玩加速或停住）
             if (animationFrameId) cancelAnimationFrame(animationFrameId);
 
             overlay.style.display = 'none';
-            
-            // 2. 初始化所有狀態
             game.score = 0;
             game.hp = 3;
-            game.lastTarget = 0; // 重置上一次數字
+            game.lastTarget = 0;
             game.active = true;
             
             document.getElementById('score').innerText = "0";
@@ -152,19 +144,19 @@
             }
             
             nextRound();
-            animationFrameId = requestAnimationFrame(gameLoop);
+            // 強制啟動 Loop
+            gameLoop();
         }
 
         function nextRound() {
             let nextNum;
-            // 確保新數字不重複
             do {
                 nextNum = Math.floor(Math.random() * 5) + 1;
             } while (nextNum === game.lastTarget);
             
             game.target = nextNum;
             game.lastTarget = nextNum;
-            game.timeLeft = 5; // 重置倒數時間
+            game.timeLeft = game.maxTime;
             
             const el = document.getElementById('target-number');
             el.innerText = game.target;
@@ -173,7 +165,7 @@
         }
 
         function handleCorrect() {
-            game.active = false; // 暫停計時與判斷
+            game.active = false;
             game.score += 10;
             document.getElementById('score').innerText = game.score;
             
@@ -181,35 +173,34 @@
             el.style.color = "var(--success)";
             el.style.transform = "scale(1.2)";
             
-            // 延遲進入下一題，提供視覺回饋
             setTimeout(() => {
                 if (game.hp > 0) {
-                    game.active = true;
                     nextRound();
+                    game.active = true;
                 }
-            }, 600);
+            }, 500);
         }
 
         function gameLoop() {
-            if (!game.active) {
-                // 如果是暫停狀態(答對瞬間)，動畫繼續跑但時間不動
-                animationFrameId = requestAnimationFrame(gameLoop);
-                return;
-            }
+            if (game.hp <= 0) return; // 遊戲結束停止循環
 
-            game.timeLeft -= 0.025; // 每一影格減少固定時間
-            const percentage = (game.timeLeft / 5) * 100;
-            timerBar.style.width = percentage + "%";
-            
-            if (game.timeLeft <= 0) {
-                game.hp--;
-                document.getElementById('hp').innerText = game.hp;
+            if (game.active) {
+                game.timeLeft -= 0.03; // 每秒約減少 1.8 單位 (60fps * 0.03)
                 
-                if (game.hp <= 0) {
-                    endGame();
-                    return;
-                } else {
-                    nextRound();
+                // 更新 UI
+                const percentage = Math.max(0, (game.timeLeft / game.maxTime) * 100);
+                timerBar.style.width = percentage + "%";
+                
+                if (game.timeLeft <= 0) {
+                    game.hp--;
+                    document.getElementById('hp').innerText = game.hp;
+                    
+                    if (game.hp <= 0) {
+                        endGame();
+                        return;
+                    } else {
+                        nextRound();
+                    }
                 }
             }
             
@@ -218,11 +209,9 @@
 
         function endGame() {
             game.active = false;
-            if (animationFrameId) cancelAnimationFrame(animationFrameId);
-            
             overlay.style.display = 'flex';
             titleEl.innerText = "挑戰結束";
-            descEl.innerHTML = `最終得分：<span style="font-size:32px; color:var(--success)">${game.score}</span><br>模型已就緒，可立即再挑戰。`;
+            descEl.innerHTML = `最終得分：<span style="font-size:32px; color:var(--success)">${game.score}</span>`;
             startBtn.innerText = "再次挑戰";
         }
 
