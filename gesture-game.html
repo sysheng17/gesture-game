@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>手指速算挑戰 - GitHub 版</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    
+    <style>
+        :root { --primary: #00d2ff; --success: #00ff88; --danger: #ff4e50; }
+        body { 
+            margin: 0; background: #0f0f0f; color: white; 
+            font-family: 'PingFang TC', sans-serif;
+            display: flex; flex-direction: column; height: 100vh; overflow: hidden;
+        }
+        /* 相機預覽區 */
+        #video-wrap { width: 100%; height: 35vh; background: #000; position: relative; }
+        #input_video { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+        #guide-canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; transform: scaleX(-1); }
+
+        /* 遊戲核心區 */
+        #game-ui { flex: 1; display: flex; flex-direction: column; justify-content: center; align-items: center; padding: 20px; }
+        #target-number { font-size: 140px; font-weight: 900; color: var(--primary); margin: 0; transition: all 0.3s; }
+        #timer-bg { width: 80%; height: 12px; background: #333; border-radius: 6px; margin: 30px 0; overflow: hidden; }
+        #timer-bar { width: 100%; height: 100%; background: var(--danger); transition: width 0.1s linear; }
+        
+        #stats { font-size: 20px; letter-spacing: 2px; }
+        #detected-hint { margin-top: 10px; color: var(--success); font-weight: bold; }
+
+        /* 開始蓋板 */
+        #overlay {
+            position: fixed; inset: 0; background: rgba(0,0,0,0.9);
+            display: flex; flex-direction: column; justify-content: center; align-items: center;
+            z-index: 100; text-align: center;
+        }
+        .btn {
+            padding: 18px 45px; font-size: 22px; background: var(--primary); color: #000;
+            border: none; border-radius: 50px; font-weight: bold; cursor: pointer;
+            box-shadow: 0 0 20px rgba(0, 210, 255, 0.4);
+        }
+        .btn:disabled { background: #555; box-shadow: none; color: #888; }
+        #loading-msg { margin-top: 15px; font-size: 14px; color: #888; }
+    </style>
+</head>
+<body>
+
+    <div id="overlay">
+        <h1 style="font-size: 32px; margin-bottom: 10px;">手指速算挑戰</h1>
+        <p style="color: #bbb; margin-bottom: 30px;">看到數字後，請快速比出正確手勢</p>
+        <button id="startBtn" class="btn" disabled>正在下載 AI 模型...</button>
+        <div id="loading-msg">初次啟動需要約 10 秒下載模型檔案</div>
+    </div>
+
+    <div id="video-wrap">
+        <video id="input_video" playsinline></video>
+        <canvas id="guide-canvas"></canvas>
+    </div>
+
+    <div id="game-ui">
+        <div id="target-number">?</div>
+        <div id="timer-bg"><div id="timer-bar"></div></div>
+        <div id="stats">得分: <span id="score">0</span> | 生命: <span id="hp">3</span></div>
+        <div id="detected-hint">偵測到：<span id="detected-count">0</span></div>
+    </div>
+
+    <script>
+        const videoElement = document.getElementById('input_video');
+        const canvasElement = document.getElementById('guide-canvas');
+        const ctx = canvasElement.getContext('2d');
+        const startBtn = document.getElementById('startBtn');
+        
+        let game = { active: false, score: 0, hp: 3, target: 0, timeLeft: 5, detected: 0 };
+
+        // --- MediaPipe 初始化 ---
+        const hands = new Hands({
+            locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+        });
+
+        hands.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.6,
+            minTrackingConfidence: 0.6
+        });
+
+        hands.onResults((results) => {
+            // 繪製骨架讓玩家知道 AI 有在動
+            drawSkeleton(results);
+            
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                const lm = results.multiHandLandmarks[0];
+                let count = 0;
+                // 指尖與關節比較法 (8,12,16,20 指尖比 6,10,14,18 關節高則算伸出)
+                if (lm[8].y < lm[6].y) count++;
+                if (lm[12].y < lm[10].y) count++;
+                if (lm[16].y < lm[14].y) count++;
+                if (lm[20].y < lm[18].y) count++;
+                // 拇指獨立判斷 (水平距離)
+                if (Math.abs(lm[4].x - lm[5].x) > 0.08) count++;
+                
+                game.detected = count;
+                document.getElementById('detected-count').innerText = count;
+
+                if (game.active && count === game.target) {
+                    handleCorrect();
+                }
+            }
+        });
+
+        // 骨架繪製功能
+        function drawSkeleton(results) {
+            ctx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            if (results.multiHandLandmarks) {
+                for (const landmarks of results.multiHandLandmarks) {
+                    ctx.fillStyle = "#00d2ff";
+                    for (const point of landmarks) {
+                        ctx.beginPath();
+                        ctx.arc(point.x * canvasElement.width, point.y * canvasElement.height, 2, 0, 2 * Math.PI);
+                        ctx.fill();
+                    }
+                }
+            }
+        }
+
+        const camera = new Camera(videoElement, {
+            onFrame: async () => { await hands.send({image: videoElement}); },
+            width: 640, height: 480
+        });
+
+        // 模型下載模擬 (MediaPipe 無法直接回報進度，我們設定一個緩衝時間)
+        setTimeout(() => {
+            startBtn.disabled = false;
+            startBtn.innerText = "進入挑戰";
+        }, 5000);
+
+        function startGame() {
+            document.getElementById('overlay').style.display = 'none';
+            camera.start();
+            game.active = true;
+            nextRound();
+            tick();
+        }
+
+        function nextRound() {
+            game.target = Math.floor(Math.random() * 5) + 1;
+            game.timeLeft = 5;
+            const el = document.getElementById('target-number');
+            el.innerText = game.target;
+            el.style.color = "var(--primary)";
+            el.style.transform = "scale(1)";
+        }
+
+        function handleCorrect() {
+            game.active = false;
+            game.score += 10;
+            document.getElementById('score').innerText = game.score;
+            const el = document.getElementById('target-number');
+            el.style.color = "var(--success)";
+            el.style.transform = "scale(1.2)";
+            setTimeout(() => { game.active = true; nextRound(); }, 600);
+        }
+
+        function tick() {
+            if (game.hp <= 0) return;
+            if (game.active) {
+                game.timeLeft -= 0.05;
+                document.getElementById('timer-bar').style.width = (game.timeLeft / 5) * 100 + "%";
+                
+                if (game.timeLeft <= 0) {
+                    game.hp--;
+                    document.getElementById('hp').innerText = game.hp;
+                    if (game.hp <= 0) {
+                        alert("遊戲結束！總得分：" + game.score);
+                        location.reload();
+                    } else {
+                        nextRound();
+                    }
+                }
+            }
+            requestAnimationFrame(tick);
+        }
+
+        startBtn.onclick = startGame;
+    </script>
+</body>
+</html>
